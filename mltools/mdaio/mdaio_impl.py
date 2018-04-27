@@ -1,5 +1,6 @@
 import numpy as np
 import struct
+import os
 
 class MdaHeader:
     def __init__(self, dt0, dims0):
@@ -18,6 +19,8 @@ class MdaHeader:
 
 class DiskReadMda:
     def __init__(self,path,header=None):
+        if (file_extension(path)=='.npy'):
+            raise Exception('DiskReadMda not yet implemented for .npy files')
         self._path=path
         if header:
             self._header=header
@@ -186,6 +189,8 @@ def _write_header(path,H,rewrite=False):
         return False
 
 def readmda(path):
+    if (file_extension(path)=='.npy'):
+        return readnpy(path);
     H=_read_header(path)
     if (H is None):
         print ("Problem reading header of: {}".format(path))
@@ -205,24 +210,38 @@ def readmda(path):
         return None
 
 def writemda32(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy32(X,fname);
     return _writemda(X,fname,'float32')
 
 def writemda64(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy64(X,fname);
     return _writemda(X,fname,'float64')
 
 def writemda8(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy8(X,fname);
     return _writemda(X,fname,'uint8')
 
 def writemda32i(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy32i(X,fname);
     return _writemda(X,fname,'int32')
 
 def writemda32ui(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy32ui(X,fname);
     return _writemda(X,fname,'uint32')    
 
 def writemda16i(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy16i(X,fname);
     return _writemda(X,fname,'int16')    
 
 def writemda16ui(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy16ui(X,fname);
     return _writemda(X,fname,'uint16')    
 
 def _writemda(X,fname,dt):
@@ -250,7 +269,32 @@ def _writemda(X,fname,dt):
         f.close()
         return False
 
+def readnpy(path):
+    return np.load(path)
+
+def writenpy8(X,path):
+    return _writenpy(X,path,dtype='int8')
+def writenpy32(X,path):
+    return _writenpy(X,path,dtype='float32')
+def writenpy64(X,path):
+    return _writenpy(X,path,dtype='float64')
+def writenpy16i(X,path):
+    return _writenpy(X,path,dtype='int16')
+def writenpy16ui(X,path):
+    return _writenpy(X,path,dtype='uint16')
+def writenpy32i(X,path):
+    return _writenpy(X,path,dtype='int32')
+def writenpy32ui(X,path):
+    return _writenpy(X,path,dtype='uint32')
+
+def _writenpy(X,path,*,dtype):
+    # apparently allowing pickling is a security issue. (according to the docs) ??
+    np.save(path,X.astype(dtype=dtype,copy=False),allow_pickle=False) # astype will always create copy if dtype does not match
+    return True
+
 def appendmda(X,path):
+    if (file_extension(path)=='.npy'):
+        raise Exception('appendmda not yet implemented for .npy files')
     H=_read_header(path)
     if (H is None):
         print ("Problem reading header of: {}".format(path))
@@ -276,6 +320,10 @@ def appendmda(X,path):
         print (e)
         f.close()
         return False
+
+def file_extension(fname):
+    filename, ext = os.path.splitext(fname)
+    return ext
     
 def _read_int32(f):
     return struct.unpack('<i',f.read(4))[0]
