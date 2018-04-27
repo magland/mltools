@@ -19,43 +19,65 @@ class MdaHeader:
 
 class DiskReadMda:
     def __init__(self,path,header=None):
-        if (file_extension(path)=='.npy'):
-            raise Exception('DiskReadMda not yet implemented for .npy files')
+        self._npy_mode=False
         self._path=path
+        if (file_extension(path)=='.npy'):
+            raise Exception('DiskReadMda implementation has not been tested for npy files')
+            self._npy_mode=True
+            if header:
+                raise Exception('header not allowed in npy mode for DiskReadMda')
         if header:
             self._header=header
             self._header.header_size=0
         else:
             self._header=_read_header(self._path)            
     def dims(self):
+        if self._npy_mode:
+            A=np.load(self._path,mmap_mode='r')
+            return A.shape
         return self._header.dims
     def N1(self):
-         return int(self._header.dims[0])
+        return self.dims()[0]
     def N2(self):
-        return int(self._header.dims[1])
+        return self.dims()[1]
     def N3(self):
-        return int(self._header.dims[2])
+        return self.dims()[2]
     def dt(self):
+        if self._npy_mode:
+            A=np.load(self._path,mmap_mode='r')
+            return A.dtype.str # todo, check if this is consistent with dtype strings below
         return self._header.dt
     def numBytesPerEntry(self):
+        if self._npy_mode:
+            A=np.load(self._path,mmap_mode='r')
+            return A.itemsize
         return self._header.num_bytes_per_entry
     def readChunk(self,i1=-1,i2=-1,i3=-1,N1=1,N2=1,N3=1):
         #print("Reading chunk {} {} {} {} {} {}".format(i1,i2,i3,N1,N2,N3))
         if (i2<0):
+            if self._npy_mode:
+                A=np.load(self._path,mmap_mode='r')
+                return A[:,:,i1:i1+N1]
             return self._read_chunk_1d(i1,N1)
         elif (i3<0):
-            if N1 != self._header.dims[0]:
-                print ("Unable to support N1 {} != {}".format(N1,self._header.dims[0]))
+            if N1 != self.N1():
+                print ("Unable to support N1 {} != {}".format(N1,self.N1()))
                 return None
             X=self._read_chunk_1d(i1+N1*i2,N1*N2)
+            if self._npy_mode:
+                A=np.load(self._path,mmap_mode='r')
+                return A[:,i2:i2+N2]
             return np.reshape(X,(N1,N2),order='F')
         else:
-            if N1 != self._header.dims[0]:
-                print ("Unable to support N1 {} != {}".format(N1,self._header.dims[0]))
+            if N1 != self.N1():
+                print ("Unable to support N1 {} != {}".format(N1,self.N1()))
                 return None
-            if N2 != self._header.dims[1]:
-                print ("Unable to support N2 {} != {}".format(N2,self._header.dims[1]))
+            if N2 != self.N2():
+                print ("Unable to support N2 {} != {}".format(N2,self.N2()))
                 return None
+            if self._npy_mode:
+                A=np.load(self._path,mmap_mode='r')
+                return A[:,:,i3:i3+N3]
             X=self._read_chunk_1d(i1+N1*i2+N1*N2*i3,N1*N2*N3)
             return np.reshape(X,(N1,N2,N3),order='F')
     def _read_chunk_1d(self,i,N):
@@ -288,8 +310,9 @@ def writenpy32ui(X,path):
     return _writenpy(X,path,dtype='uint32')
 
 def _writenpy(X,path,*,dtype):
+    np.save(path,X.astype(dtype=dtype,copy=False)) # astype will always create copy if dtype does not match
     # apparently allowing pickling is a security issue. (according to the docs) ??
-    np.save(path,X.astype(dtype=dtype,copy=False),allow_pickle=False) # astype will always create copy if dtype does not match
+    #np.save(path,X.astype(dtype=dtype,copy=False),allow_pickle=False) # astype will always create copy if dtype does not match
     return True
 
 def appendmda(X,path):

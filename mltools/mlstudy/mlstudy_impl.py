@@ -159,6 +159,7 @@ def _read_int32(f):
 def _read_int64(f):
     return struct.unpack('<q',f.read(8))[0]
 
+'''
 def _header_from_bytes(Bytes):
     f=io.BytesIO(Bytes)
     ret=mdaio._header_from_file(f)
@@ -181,6 +182,8 @@ def _mda_from_bytes(Bytes):
     except Exception as e: # catch *all* exceptions
         print (e)
         return None
+'''
 
 def loadMdaFile(obj):
-    return _mda_from_bytes(loadFile(obj))
+    return mdaio.readmda(getFilePath(obj))
+    #return _mda_from_bytes(loadFile(obj))
