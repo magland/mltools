@@ -1,19 +1,21 @@
 import numpy as np
-
-from mltools import mdaio
+import struct
 import os
 
-def file_extension(fname):
-    filename, ext = os.path.splitext(fname)
-    return ext
-
-def determine_file_format(ext,dimensions):
-    if ext=='.mda':
-        return 'mda'
-    elif ext=='.npy':
-        return 'npy'
-    else:
-        return 'dat'
+class MdaHeader:
+    def __init__(self, dt0, dims0):
+        uses64bitdims=(max(dims0)>2e9)            
+        self.uses64bitdims=uses64bitdims
+        self.dt_code=_dt_code_from_dt(dt0)
+        self.dt=dt0
+        self.num_bytes_per_entry=get_num_bytes_per_entry_from_dt(dt0)
+        self.num_dims=len(dims0)
+        self.dimprod=np.prod(dims0)
+        self.dims=dims0
+        if uses64bitdims:
+            self.header_size=3*4+self.num_dims*8
+        else:
+            self.header_size=(3+self.num_dims)*4
 
 def npy_dtype_to_string(dt):
     str=dt.str[1:]
@@ -28,6 +30,117 @@ def npy_dtype_to_string(dt):
         "u4":'uint32'
     }
     return map[str]
+
+class DiskReadMda:
+    def __init__(self,path,header=None):
+        self._npy_mode=False
+        self._path=path
+        if (file_extension(path)=='.npy'):
+            raise Exception('DiskReadMda implementation has not been tested for npy files')
+            self._npy_mode=True
+            if header:
+                raise Exception('header not allowed in npy mode for DiskReadMda')
+        if header:
+            self._header=header
+            self._header.header_size=0
+        else:
+            self._header=_read_header(self._path)            
+    def dims(self):
+        if self._npy_mode:
+            A=np.load(self._path,mmap_mode='r')
+            return A.shape
+        return self._header.dims
+    def N1(self):
+        return self.dims()[0]
+    def N2(self):
+        return self.dims()[1]
+    def N3(self):
+        return self.dims()[2]
+    def dt(self):
+        if self._npy_mode:
+            A=np.load(self._path,mmap_mode='r')
+            return npy_dtype_to_string(A.dtype)
+        return self._header.dt
+    def numBytesPerEntry(self):
+        if self._npy_mode:
+            A=np.load(self._path,mmap_mode='r')
+            return A.itemsize
+        return self._header.num_bytes_per_entry
+    def readChunk(self,i1=-1,i2=-1,i3=-1,N1=1,N2=1,N3=1):
+        #print("Reading chunk {} {} {} {} {} {}".format(i1,i2,i3,N1,N2,N3))
+        if (i2<0):
+            if self._npy_mode:
+                A=np.load(self._path,mmap_mode='r')
+                return A[:,:,i1:i1+N1]
+            return self._read_chunk_1d(i1,N1)
+        elif (i3<0):
+            if N1 != self.N1():
+                print ("Unable to support N1 {} != {}".format(N1,self.N1()))
+                return None
+            X=self._read_chunk_1d(i1+N1*i2,N1*N2)
+            if self._npy_mode:
+                A=np.load(self._path,mmap_mode='r')
+                return A[:,i2:i2+N2]
+            return np.reshape(X,(N1,N2),order='F')
+        else:
+            if N1 != self.N1():
+                print ("Unable to support N1 {} != {}".format(N1,self.N1()))
+                return None
+            if N2 != self.N2():
+                print ("Unable to support N2 {} != {}".format(N2,self.N2()))
+                return None
+            if self._npy_mode:
+                A=np.load(self._path,mmap_mode='r')
+                return A[:,:,i3:i3+N3]
+            X=self._read_chunk_1d(i1+N1*i2+N1*N2*i3,N1*N2*N3)
+            return np.reshape(X,(N1,N2,N3),order='F')
+    def _read_chunk_1d(self,i,N):
+        f=open(self._path,"rb")
+        try:
+            f.seek(self._header.header_size+self._header.num_bytes_per_entry*i)
+            ret=np.fromfile(f,dtype=self._header.dt,count=N)
+            f.close()
+            return ret
+        except Exception as e: # catch *all* exceptions
+            print (e)
+            f.close()
+            return None
+
+def _dt_from_dt_code(dt_code):
+    if dt_code == -2:
+        dt='uint8'
+    elif dt_code == -3:
+        dt='float32'
+    elif dt_code == -4:
+        dt='int16'
+    elif dt_code == -5:
+        dt='int32'
+    elif dt_code == -6:
+        dt='uint16'
+    elif dt_code == -7:
+        dt='float64'
+    elif dt_code == -8:
+        dt='uint32'
+    else:
+        dt=None
+    return dt
+
+def _dt_code_from_dt(dt):
+    if dt == 'uint8':
+        return -2
+    if dt == 'float32':
+        return -3
+    if dt == 'int16':
+        return -4
+    if dt == 'int32':
+        return -5
+    if dt == 'uint16':
+        return -6
+    if dt == 'float64':
+        return -7
+    if dt == 'uint32':
+        return -8
+    return None
 
 def get_num_bytes_per_entry_from_dt(dt):
     if dt == 'uint8':
@@ -46,158 +159,288 @@ def get_num_bytes_per_entry_from_dt(dt):
         return 4
     return None
 
-def copy_raw_file_data(input,output,*,start_byte,num_entries,dtype,dtype_out):
-    if dtype != dtype_out:
-        raise Exception('Copying from one datatype to another not yet implemented')
-    size1=get_num_bytes_per_entry_from_dt(dtype)
-    size2=get_num_bytes_per_entry_from_dt(dtype_out)
-    bufsize=10000
-    with open(input,'rb') as f1:
-        f1.seek(start_byte)
-        with open(output,'wb') as f2:
-            while num_entries:
-                chunk_num_entries = min(bufsize,num_entries)
-                data = f1.read(chunk_num_entries*size1)
-                ## convert data here
-                f2.write(data)
-                num_entries -= chunk_num_entries
+def readmda_header(path):
+    if (file_extension(path)=='.npy'):
+        raise Exception('Cannot read mda header for .npy file.')
+    return _read_header(path)
 
-def determine_npy_header_size(fname):
-    with open(fname,'rb') as f:
-        header_str=f.readline() ## I think it ends with \n
-        return f.tell()
-
-processor_name='ephys.convert_array'
-processor_version='0.1'
-def convert_array(*,input,output,dimensions='',dtype='',dtype_out=''):
-    """
-    Convert a multi-dimensional array between various formats ('.mda', '.npy', '.dat') based on the file extensions of the input/output files
-
-    Parameters
-    ----------
-    input : INPUT
-        Path of input array file.
-    output : INPUT
-        Path of the output array file.
-        
-    dimensions : string
-        Comma-separated list of dimensions (shape). If empty, it is auto-determined, if possible, by the input array.
-    dtype : string
-        The data format for the input array. Choices: int8, int16, int32, uint16, uint32, float32, float64 (possibly float16 in the future).
-    dtype_out : string
-        The data format for the output array. If empty, the dtype for the input array is used.
-        
-    """    
-    format_in=determine_file_format(file_extension(input),dimensions)
-    format_out=determine_file_format(file_extension(output),dimensions)
-    print ('Input/output formats: {}/{}'.format(format_in,format_out))
-
-    dims=None
-
-    if (format_in=='mda') and (dtype==''):
-        header=mdaio.readmda_header(input)
-        dtype=header.dt
-        dims=header.dims
-
-    if (format_in=='npy') and (dtype==''):
-        A=np.load(input,mmap_mode='r')
-        dtype=npy_dtype_to_string(A.dtype)
-        dims=A.shape
-        A=0
-
-    if dimensions:
-        dims2=[int(entry) for entry in dimensions.split(',')]
-        if dims:
-            if len(dims) != len(dims2):
-                raise Exception('Inconsistent number of dimensions for input array')
-            if not np.all(np.array(dims)==np.array(dims2)):
-                raise Exception('Inconsistent dimensions for input array')
-        dims=dims2
-
-    if not dtype_out:
-        dtype_out=dtype
-
-    if not dtype:
-        raise Exception('Unable to determine datatype for input array')
-
-    if not dtype_out:
-        raise Exception('Unable to determine datatype for output array')
-
-    if not dims:
-        raise Exception('Unable to determine dimensions for input array')
-
-    print ('Using dtype={}, dtype_out={}, dimensions={}'.format(dtype,dtype_out,','.join(str(item) for item in dims)))
-
-    if (format_in==format_out) and ((dtype==dtype_out) or (dtype_out=='')):
-        print ('Simply copying file...')
-        shutil.copyfile(input,output)
-        print ('Done.')
-        return True
-
-    if format_out=='dat':
-        if format_in=='mda':
-            H=mdaio.readmda_header(input)
-            copy_raw_file_data(input,output,start_byte=H.header_size,num_entries=np.product(dims),dtype=dtype,dtype_out=dtype_out)
-            return True
-        elif format_in=='npy':
-            print ('Warning: loading entire array into memory. This should be avoided in the future.')
-            A=np.load(input,mmap_mode='r').astype(dtype=dtype_out,order='F',copy=False)
-            A=A.ravel(order='F')
-            A.tofile(output)
-            # The following was problematic because of row-major ordering, i think
-            #header_size=determine_npy_header_size(input)
-            #copy_raw_file_data(input,output,start_byte=header_size,num_entries=np.product(dims),dtype=dtype,dtype_out=dtype_out)
-            return True
-        elif format_in=='dat':
-            raise Exception('This case not yet implemented.')
+def _read_header(path):
+    f=open(path,"rb")
+    try:
+        dt_code=_read_int32(f)
+        num_bytes_per_entry=_read_int32(f)
+        num_dims=_read_int32(f)
+        uses64bitdims=False
+        if (num_dims<0):
+            uses64bitdims=True
+            num_dims=-num_dims
+        if (num_dims<1) or (num_dims>6): # allow single dimension as of 12/6/17
+            print ("Invalid number of dimensions: {}".format(num_dims))
+            f.close()
+            return None
+        dims=[]
+        dimprod=1
+        if uses64bitdims:
+            for j in range(0,num_dims):
+                tmp0=_read_int64(f)
+                dimprod=dimprod*tmp0
+                dims.append(tmp0)
         else:
-            raise Exception('Unexpected case.')
+            for j in range(0,num_dims):
+                tmp0=_read_int32(f)
+                dimprod=dimprod*tmp0
+                dims.append(tmp0)
+        dt=_dt_from_dt_code(dt_code)
+        if dt is None:
+            print ("Invalid data type code: {}".format(dt_code))
+            f.close()
+            return None
+        H=MdaHeader(dt,dims)
+        if (uses64bitdims):
+            H.uses64bitdims=True
+            H.header_size=3*4+H.num_dims*8
+        f.close()
+        return H
+    except Exception as e: # catch *all* exceptions
+        print (e)
+        f.close()
+        return None
 
-    elif (format_out=='mda') or (format_out=='npy'):
-        if format_in=='npy':
-            print ('Warning: loading entire array into memory. This should be avoided in the future.')
-            A=np.load(input,mmap_mode='r').astype(dtype=dtype,order='F',copy=False)
-            if format_out=='mda':
-                mdaio.writemda(A,output,dtype=dtype_out)
-            else:
-                mdaio.writenpy(A,output,dtype=dtype_out)
-            return True
-        elif format_in=='dat':
-            print ('Warning: loading entire array into memory. This should be avoided in the future.')
-            A=np.fromfile(input,dtype=dtype,count=np.product(dims));
-            A=A.reshape(tuple(dims),order='F')
-            if format_out=='mda':
-                mdaio.writemda(A,output,dtype=dtype_out)
-            else:
-                mdaio.writenpy(A,output,dtype=dtype_out)
-            return True
-        elif format_in=='mda':
-            print ('Warning: loading entire array into memory. This should be avoided in the future.')
-            A=mdaio.readmda(input)
-            if format_out=='mda':
-                mdaio.writemda(A,output,dtype=dtype_out)
-            else:
-                mdaio.writenpy(A,output,dtype=dtype_out)
-            return True
-        else:
-            raise Exception('Unexpected case.')
+def _write_header(path,H,rewrite=False):
+    if rewrite:
+        f=open(path,"r+b")
     else:
-        raise Exception('Unexpected output format: {}'.format(format_out))
+        f=open(path,"wb")
+    try:
+        _write_int32(f,H.dt_code)
+        _write_int32(f,H.num_bytes_per_entry)
+        if H.uses64bitdims:
+            _write_int32(f,-H.num_dims)
+            for j in range(0,H.num_dims):
+                _write_int64(f,H.dims[j])
+        else:
+            _write_int32(f,H.num_dims)
+            for j in range(0,H.num_dims):
+                _write_int32(f,H.dims[j])
+        f.close()
+        return True
+    except Exception as e: # catch *all* exceptions
+        print (e)
+        f.close()
+        return False
 
-    raise Exception('Unexpected error.')
+def readmda(path):
+    if (file_extension(path)=='.npy'):
+        return readnpy(path);
+    H=_read_header(path)
+    if (H is None):
+        print ("Problem reading header of: {}".format(path))
+        return None
+    ret=np.array([])
+    f=open(path,"rb")
+    try:
+        f.seek(H.header_size)
+        #This is how I do the column-major order
+        ret=np.fromfile(f,dtype=H.dt,count=H.dimprod)
+        ret=np.reshape(ret,H.dims,order='F')
+        f.close()
+        return ret
+    except Exception as e: # catch *all* exceptions
+        print (e)
+        f.close()
+        return None
 
-convert_array.name=processor_name
-convert_array.version=processor_version
+def writemda32(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy32(X,fname);
+    return _writemda(X,fname,'float32')
 
-def test_convert_array(dtype='int32',shape=[12,3,7]):
-    X=np.array(np.random.normal(0,1,shape),dtype=dtype)
-    np.save('test_convert1.npy',X)
-    convert_array(input='test_convert1.npy',output='test_convert2.mda') # npy -> mda
-    convert_array(input='test_convert2.mda',output='test_convert3.npy') # mda -> npy
-    convert_array(input='test_convert3.npy',output='test_convert4.dat') # npy -> dat
-    convert_array(input='test_convert4.dat',output='test_convert5.npy',dtype=dtype,dimensions=','.join(str(entry) for entry in X.shape))  # dat -> npy
-    convert_array(input='test_convert5.npy',output='test_convert6.mda') # npy -> mda
-    convert_array(input='test_convert6.mda',output='test_convert7.dat') # mda -> dat
-    convert_array(input='test_convert7.dat',output='test_convert8.mda',dtype=dtype,dimensions=','.join(str(entry) for entry in X.shape)) # dat -> mda
-    Y=mdaio.readmda('test_convert8.mda')
-    print(np.max(np.abs(X-Y)),Y.dtype)
+def writemda64(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy64(X,fname);
+    return _writemda(X,fname,'float64')
+
+def writemda8(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy8(X,fname);
+    return _writemda(X,fname,'uint8')
+
+def writemda32i(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy32i(X,fname);
+    return _writemda(X,fname,'int32')
+
+def writemda32ui(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy32ui(X,fname);
+    return _writemda(X,fname,'uint32')    
+
+def writemda16i(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy16i(X,fname);
+    return _writemda(X,fname,'int16')    
+
+def writemda16ui(X,fname):
+    if (file_extension(fname)=='.npy'):
+        return writenpy16ui(X,fname);
+    return _writemda(X,fname,'uint16')
+
+def writemda(X,fname,*,dtype):
+    return _writemda(X,fname,dtype)
+
+def _writemda(X,fname,dt):
+    dt_code=0
+    num_bytes_per_entry=get_num_bytes_per_entry_from_dt(dt)
+    dt_code=_dt_code_from_dt(dt)
+    if dt_code is None:
+        print ("Unexpected data type: {}".format(dt))
+        return False
+
+    f=open(fname,'wb')
+    try:
+        _write_int32(f,dt_code)
+        _write_int32(f,num_bytes_per_entry)
+        _write_int32(f,X.ndim)
+        for j in range(0,X.ndim):
+            _write_int32(f,X.shape[j])
+        #This is how I do column-major order
+        A=np.reshape(X,X.size,order='F').astype(dt)
+        A.tofile(f)
+        f.close()
+        return True
+    except Exception as e: # catch *all* exceptions
+        print (e)
+        f.close()
+        return False
+
+def readnpy(path):
+    return np.load(path)
+
+def writenpy8(X,path):
+    return _writenpy(X,path,dtype='int8')
+def writenpy32(X,path):
+    return _writenpy(X,path,dtype='float32')
+def writenpy64(X,path):
+    return _writenpy(X,path,dtype='float64')
+def writenpy16i(X,path):
+    return _writenpy(X,path,dtype='int16')
+def writenpy16ui(X,path):
+    return _writenpy(X,path,dtype='uint16')
+def writenpy32i(X,path):
+    return _writenpy(X,path,dtype='int32')
+def writenpy32ui(X,path):
+    return _writenpy(X,path,dtype='uint32')
+
+def writenpy(X,path,*,dtype):
+    return _writenpy(X,path,dtype=dtype)
+
+def _writenpy(X,path,*,dtype):
+    np.save(path,X.astype(dtype=dtype,copy=False)) # astype will always create copy if dtype does not match
+    # apparently allowing pickling is a security issue. (according to the docs) ??
+    #np.save(path,X.astype(dtype=dtype,copy=False),allow_pickle=False) # astype will always create copy if dtype does not match
+    return True
+
+def appendmda(X,path):
+    if (file_extension(path)=='.npy'):
+        raise Exception('appendmda not yet implemented for .npy files')
+    H=_read_header(path)
+    if (H is None):
+        print ("Problem reading header of: {}".format(path))
+        return None
+    if (len(H.dims) != len(X.shape)):
+        print ("Incompatible number of dimensions in appendmda",H.dims,X.shape)
+        return None
+    num_entries_old=np.product(H.dims)
+    num_dims=len(H.dims)
+    for j in range(num_dims-1):
+        if (X.shape[j]!=X.shape[j]):
+            print ("Incompatible dimensions in appendmda",H.dims,X.shape)
+            return None
+    H.dims[num_dims-1]=H.dims[num_dims-1]+X.shape[num_dims-1]
+    try:
+        _write_header(path,H,rewrite=True)
+        f=open(path,"r+b")
+        f.seek(H.header_size+H.num_bytes_per_entry*num_entries_old)
+        A=np.reshape(X,X.size,order='F').astype(H.dt)
+        A.tofile(f)
+        f.close()
+    except Exception as e: # catch *all* exceptions
+        print (e)
+        f.close()
+        return False
+
+def file_extension(fname):
+    filename, ext = os.path.splitext(fname)
+    return ext
+    
+def _read_int32(f):
+    return struct.unpack('<i',f.read(4))[0]
+    
+def _read_int64(f):
+    return struct.unpack('<q',f.read(8))[0]
+
+def _write_int32(f,val):
+    f.write(struct.pack('<i',val))
+    
+def _write_int64(f,val):
+    f.write(struct.pack('<q',val))
+    
+def _header_from_file(f):
+    try:
+        dt_code=_read_int32(f)
+        num_bytes_per_entry=_read_int32(f)
+        num_dims=_read_int32(f)
+        uses64bitdims=False
+        if (num_dims<0):
+            uses64bitdims=True
+            num_dims=-num_dims
+        if (num_dims<1) or (num_dims>6): # allow single dimension as of 12/6/17
+            print ("Invalid number of dimensions: {}".format(num_dims))
+            return None
+        dims=[]
+        dimprod=1
+        if uses64bitdims:
+            for j in range(0,num_dims):
+                tmp0=_read_int64(f)
+                dimprod=dimprod*tmp0
+                dims.append(tmp0)
+        else:
+            for j in range(0,num_dims):
+                tmp0=_read_int32(f)
+                dimprod=dimprod*tmp0
+                dims.append(tmp0)
+        dt=_dt_from_dt_code(dt_code)
+        if dt is None:
+            print ("Invalid data type code: {}".format(dt_code))
+            return None
+        H=MdaHeader(dt,dims)
+        if (uses64bitdims):
+            H.uses64bitdims=True
+            H.header_size=3*4+H.num_dims*8
+        return H
+    except Exception as e: # catch *all* exceptions
+        print (e)
+        return None
+
+def mdaio_test():
+    M=4
+    N=12
+    X=np.ndarray((M,N))
+    for n in range(0,N):
+        for m in range(0,M):
+            X[m,n]=n*10+m
+    writemda32(X,'tmp1.mda')
+    Y=readmda('tmp1.mda')
+    print (Y)
+    print (np.absolute(X-Y).max())
+    Z=DiskReadMda('tmp1.mda')
+    print (Z.readChunk(i1=0,i2=4,N1=M,N2=N-4))
+
+    A=DiskWriteMda('tmpA.mda',(M,N))
+    A.writeChunk(Y,i1=0,i2=0)
+    B=readmda('tmpA.mda')
+    print (B.shape)
+    print (B)
+    
+
+#mdaio_test()
