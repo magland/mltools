@@ -128,7 +128,7 @@ class _MLProcessor:
             val=inputs[iname]
             if isinstance(val,(list,tuple)):
                 for val0 in val:
-                    path0=self._get_path_for_input(argname,val0)
+                    path0=self._get_path_for_input('',val0)
                     cmd=cmd+' {}:{}'.format(iname,path0)
             else:
                 path0=self._get_path_for_input(iname,val)
